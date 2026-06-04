@@ -1,8 +1,10 @@
-# ctrlBolt
+# Ctrl-Bolt
 
-`ctrlBolt` is a reusable numbered-prompt chain runner for AI coding CLIs.
+`Ctrl-Bolt` is a reusable numbered-prompt chain runner for AI coding CLIs.
 
-It replaces one-off scripts like `run_codex_chain.sh` with a standardized runner that supports multiple providers, per-project state, resume, logs, git checkpoints, tests, and clean usage-limit exits.
+It replaces one-off scripts like `run_ai_prompts.sh` with a standardized runner that supports multiple providers, per-project state, resume, logs, git checkpoints, tests, and clean usage-limit exits. Essentially an AI agentic loop routed to md files. 
+
+Attn: Although the name of the program is "Ctrl-Bolt", formatted in the respective manner, in the terminal it is simply -- "ctrlBolt"
 
 ## Supported adapters
 
@@ -35,23 +37,23 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-## Use with macsvg
+## Use with a program
 
 ```bash
 cd ~/bb/projects
 
 ctrlBolt \
   --provider codex \
-  --prompt-dir ~/bb/projects/macsvg_prompt_kit \
-  --root-dir ~/bb/projects \
-  --project-dir ~/bb/projects/macsvg \
+  --prompt-dir ~/path/to/directory/<program>_prompt_kit \
+  --root-dir ~/path/to/dir \
+  --project-dir ~/path/to/dir \
   --danger
 ```
 
 Resume:
 
 ```bash
-ctrlBolt --resume --project-dir ~/bb/projects/macsvg
+ctrlBolt --resume --project-dir ~/path/to/dir
 ```
 
 ## Use with Claude Code
@@ -59,9 +61,9 @@ ctrlBolt --resume --project-dir ~/bb/projects/macsvg
 ```bash
 ctrlBolt \
   --provider claude \
-  --prompt-dir ~/bb/projects/macsvg_prompt_kit \
-  --root-dir ~/bb/projects \
-  --project-dir ~/bb/projects/macsvg \
+  --prompt-dir ~/path/to/AI_prompt_kit \
+  --root-dir ~/path/to/dir \
+  --project-dir ~/path/to/dir/ \
   --danger
 ```
 
@@ -72,9 +74,9 @@ ctrlBolt \
 ```bash
 ctrlBolt \
   --provider gemini \
-  --prompt-dir ~/bb/projects/macsvg_prompt_kit \
-  --root-dir ~/bb/projects \
-  --project-dir ~/bb/projects/macsvg
+  --prompt-dir ~/path/to/AI_prompt_kit \
+  --root-dir ~/path/to/ \
+  --project-dir ~/path/to/dir
 ```
 
 ## Use with Aider
@@ -82,9 +84,9 @@ ctrlBolt \
 ```bash
 ctrlBolt \
   --provider aider \
-  --prompt-dir ~/bb/projects/macsvg_prompt_kit \
-  --root-dir ~/bb/projects \
-  --project-dir ~/bb/projects/macsvg
+  --prompt-dir ~/path/to/AI_prompt_kit \
+  --root-dir ~/path/to \
+  --project-dir ~/path/to/tool
 ```
 
 ## Use with Ollama local model
@@ -95,9 +97,9 @@ Ollama alone is usually advisory/review output, not a full file-editing coding a
 ctrlBolt \
   --provider ollama \
   --model qwen2.5-coder:7b \
-  --prompt-dir ~/bb/projects/macsvg_prompt_kit \
-  --root-dir ~/bb/projects \
-  --project-dir ~/bb/projects/macsvg
+  --prompt-dir ~/path/to/AI_prompt_kit \
+  --root-dir ~/path/to/ \
+  --project-dir ~/path/to/dir/
 ```
 
 ## Use any local/custom agent
@@ -171,12 +173,12 @@ Number prompt files like this:
 
 ## Usage-limit behavior
 
-If the provider output includes quota/rate/usage-limit language, `ctrlBolt` saves state and exits with code `75`.
+If the provider output includes quota/rate/usage-limit language, `Ctrl-Bolt` saves state and exits with code `75`.
 
 Resume later:
 
 ```bash
 ctrlBolt --resume --project-dir ~/bb/projects/macsvg
 ```
-# ctrlBolt
-# ctrlBolt
+# Ctrl-Bolt
+
