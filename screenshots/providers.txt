@@ -1,0 +1,47 @@
+ctrlBolt providers
+
+codex
+  OpenAI Codex CLI, non-interactive exec mode.
+  mode: stdin
+  cmd:  codex exec
+  danger args: --dangerously-bypass-approvals-and-sandbox
+  notes: Uses: codex exec [flags] -
+
+claude
+  Claude Code print mode.
+  mode: arg
+  cmd:  claude -p
+  danger args: --permission-mode bypassPermissions
+  notes: Uses: claude -p [flags] '<prompt>'. For very large prompts, use --provider custom.
+
+gemini
+  Gemini CLI headless/non-interactive prompt mode.
+  mode: arg
+  cmd:  gemini -p
+  danger args: --approval-mode auto_edit
+  notes: Uses: gemini -p '<prompt>'. Adjust danger args if your Gemini CLI version differs.
+
+aider
+  Aider scripted mode.
+  mode: arg
+  cmd:  aider --yes-always --no-auto-commits --message
+  notes: Uses: aider --yes-always --no-auto-commits --message '<prompt>'.
+
+opencode
+  Generic opencode adapter; may need --provider-cmd on your install.
+  mode: stdin
+  cmd:  opencode run
+  notes: Experimental. If your opencode CLI differs, use --provider custom.
+
+ollama
+  Local Ollama model. Review/advisory by default; does not edit files unless your wrapper handles edits.
+  mode: ollama
+  cmd:  ollama run
+  note: review/advisory provider by default; not a file-editing agent
+  notes: Uses: ollama run <model>; pass --model qwen2.5-coder:7b or similar.
+
+custom
+  Custom shell command template.
+  mode: custom
+  notes: Requires --provider-cmd. Placeholders: {prompt_file}, {project_dir}, {root_dir}, {log_file}, {prompt_text_file}.
+

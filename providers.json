@@ -1,0 +1,10 @@
+{
+  "providers": {
+    "codex": "codex exec -",
+    "claude": "claude -p '<prompt>'",
+    "gemini": "gemini -p '<prompt>'",
+    "aider": "aider --yes-always --no-auto-commits --message '<prompt>'",
+    "ollama": "ollama run <model> < prompt",
+    "custom": "user-supplied command template"
+  }
+}

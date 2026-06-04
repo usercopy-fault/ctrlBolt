@@ -1,0 +1,767 @@
+#!/usr/bin/env python3
+"""
+ctrlBolt: numbered-prompt chain runner for AI coding CLIs.
+
+Purpose:
+  Run prompt kits like:
+    00_MASTER_ARCHITECTURE.md
+    01_CORE.md
+    02_REFINER.md
+
+  through different AI coding providers with:
+    - per-project state
+    - resume
+    - logs
+    - usage/quota clean exit
+    - git checkpoints
+    - optional tests
+    - provider adapters
+
+Examples:
+  ctrlBolt --provider codex \
+    --prompt-dir ~/bb/projects/macsvg_prompt_kit \
+    --root-dir ~/bb/projects \
+    --project-dir ~/bb/projects/macsvg \
+    --danger
+
+  ctrlBolt --resume --project-dir ~/bb/projects/macsvg
+
+  ctrlBolt providers
+
+  ctrlBolt --provider claude \
+    --prompt-dir ~/bb/projects/macsvg_prompt_kit \
+    --root-dir ~/bb/projects \
+    --project-dir ~/bb/projects/macsvg \
+    --danger
+
+  ctrlBolt --provider custom \
+    --provider-cmd 'myagent --project {project_dir} --prompt-file {prompt_file}' \
+    --prompt-dir ~/prompts/toolkit \
+    --root-dir ~/bb/projects \
+    --project-dir ~/bb/projects/tool
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import hashlib
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+
+USAGE_PATTERNS = [
+    r"usage limit",
+    r"limit reached",
+    r"rate limit",
+    r"quota",
+    r"insufficient_quota",
+    r"out of.*usage",
+    r"too many requests",
+    r"billing",
+    r"weekly limit",
+    r"5[- ]?hour",
+    r"daily limit",
+    r"monthly limit",
+    r"credit balance",
+    r"exceeded your current quota",
+    r"usage credits",
+    r"maximum.*budget",
+    r"max.*turns.*reached",
+]
+
+DEFAULT_PROMPT_GLOBS = [
+    r"^[0-9][0-9][_-].*\.md$",
+    r"^[0-9][0-9][_-].*\.txt$",
+    r"^[0-9][0-9][_-].*\.prompt$",
+]
+
+
+@dataclass
+class ProviderSpec:
+    name: str
+    description: str
+    mode: str  # stdin | arg | custom | ollama
+    base_cmd: List[str]
+    danger_args: List[str]
+    prompt_arg_flag: Optional[str] = None
+    stdin_marker: Optional[str] = None
+    supports_edits: bool = True
+    notes: str = ""
+
+
+PROVIDERS: Dict[str, ProviderSpec] = {
+    "codex": ProviderSpec(
+        name="codex",
+        description="OpenAI Codex CLI, non-interactive exec mode.",
+        mode="stdin",
+        base_cmd=["codex", "exec"],
+        danger_args=["--dangerously-bypass-approvals-and-sandbox"],
+        stdin_marker="-",
+        supports_edits=True,
+        notes="Uses: codex exec [flags] -",
+    ),
+    "claude": ProviderSpec(
+        name="claude",
+        description="Claude Code print mode.",
+        mode="arg",
+        base_cmd=["claude", "-p"],
+        danger_args=["--permission-mode", "bypassPermissions"],
+        supports_edits=True,
+        notes="Uses: claude -p [flags] '<prompt>'. For very large prompts, use --provider custom.",
+    ),
+    "gemini": ProviderSpec(
+        name="gemini",
+        description="Gemini CLI headless/non-interactive prompt mode.",
+        mode="arg",
+        base_cmd=["gemini", "-p"],
+        danger_args=["--approval-mode", "auto_edit"],
+        supports_edits=True,
+        notes="Uses: gemini -p '<prompt>'. Adjust danger args if your Gemini CLI version differs.",
+    ),
+    "aider": ProviderSpec(
+        name="aider",
+        description="Aider scripted mode.",
+        mode="arg",
+        base_cmd=["aider", "--yes-always", "--no-auto-commits", "--message"],
+        danger_args=[],
+        supports_edits=True,
+        notes="Uses: aider --yes-always --no-auto-commits --message '<prompt>'.",
+    ),
+    "opencode": ProviderSpec(
+        name="opencode",
+        description="Generic opencode adapter; may need --provider-cmd on your install.",
+        mode="stdin",
+        base_cmd=["opencode", "run"],
+        danger_args=[],
+        stdin_marker=None,
+        supports_edits=True,
+        notes="Experimental. If your opencode CLI differs, use --provider custom.",
+    ),
+    "ollama": ProviderSpec(
+        name="ollama",
+        description="Local Ollama model. Review/advisory by default; does not edit files unless your wrapper handles edits.",
+        mode="ollama",
+        base_cmd=["ollama", "run"],
+        danger_args=[],
+        supports_edits=False,
+        notes="Uses: ollama run <model>; pass --model qwen2.5-coder:7b or similar.",
+    ),
+    "custom": ProviderSpec(
+        name="custom",
+        description="Custom shell command template.",
+        mode="custom",
+        base_cmd=[],
+        danger_args=[],
+        supports_edits=True,
+        notes="Requires --provider-cmd. Placeholders: {prompt_file}, {project_dir}, {root_dir}, {log_file}, {prompt_text_file}.",
+    ),
+}
+
+
+def now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def expand_path(p: str | Path) -> Path:
+    return Path(os.path.expandvars(os.path.expanduser(str(p)))).resolve()
+
+
+def slugify(s: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "-", s.strip())
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s or "project"
+
+
+def print_c(msg: str, color: str = "36", stream=None) -> None:
+    stream = stream or sys.stdout
+    ts = time.strftime("%H:%M:%S")
+    stream.write(f"\033[1;{color}m[{ts}]\033[0m {msg}\n")
+    stream.flush()
+
+
+def warn(msg: str) -> None:
+    print_c(f"WARN: {msg}", "33", sys.stderr)
+
+
+def err(msg: str) -> None:
+    print_c(f"ERROR: {msg}", "31", sys.stderr)
+
+
+def sha256_text(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8", errors="replace")).hexdigest()
+
+
+def read_text_safe(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def detect_usage_limit(text: str) -> bool:
+    return any(re.search(pat, text, flags=re.I | re.S) for pat in USAGE_PATTERNS)
+
+
+def shell_join(cmd: List[str]) -> str:
+    return " ".join(shlex.quote(x) for x in cmd)
+
+
+def run_simple(cmd: List[str], cwd: Path, timeout: Optional[int] = None) -> Tuple[int, str]:
+    try:
+        p = subprocess.run(cmd, cwd=str(cwd), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+        return p.returncode, p.stdout
+    except FileNotFoundError:
+        return 127, f"command not found: {cmd[0]}"
+    except subprocess.TimeoutExpired as e:
+        return 124, (e.stdout or "") + f"\nTIMEOUT after {timeout}s"
+
+
+@dataclass
+class CtrlBoltConfig:
+    provider: str
+    prompt_dir: Path
+    root_dir: Path
+    project_dir: Path
+    project_name: str
+    state_root: Path
+    state_dir: Path
+    log_dir: Path
+    state_file: Path
+    danger: bool = False
+    resume: bool = False
+    start_at: Optional[str] = None
+    auto_commit: bool = True
+    run_tests: bool = False
+    continue_on_error: bool = False
+    fail_fast: bool = True
+    timeout: Optional[int] = None
+    model: Optional[str] = None
+    provider_cmd: Optional[str] = None
+    extra_args: List[str] = None
+    dry_run: bool = False
+
+    def to_state_base(self) -> Dict:
+        return {
+            "provider": self.provider,
+            "prompt_dir": str(self.prompt_dir),
+            "root_dir": str(self.root_dir),
+            "project_dir": str(self.project_dir),
+            "project_name": self.project_name,
+            "state_root": str(self.state_root),
+            "state_dir": str(self.state_dir),
+            "log_dir": str(self.log_dir),
+            "danger": self.danger,
+            "auto_commit": self.auto_commit,
+            "run_tests": self.run_tests,
+            "continue_on_error": self.continue_on_error,
+            "timeout": self.timeout,
+            "model": self.model,
+            "provider_cmd": self.provider_cmd,
+            "extra_args": self.extra_args or [],
+        }
+
+
+class CtrlBolt:
+    def __init__(self, cfg: CtrlBoltConfig):
+        self.cfg = cfg
+        self.prompts: List[Path] = []
+        self.current_process: Optional[subprocess.Popen] = None
+        self.stop_requested = False
+
+    def setup(self) -> None:
+        self.cfg.state_dir.mkdir(parents=True, exist_ok=True)
+        self.cfg.log_dir.mkdir(parents=True, exist_ok=True)
+        self.prompts = self.collect_prompts()
+        if not self.prompts:
+            raise SystemExit(f"No numbered prompt files found in: {self.cfg.prompt_dir}")
+
+    def collect_prompts(self) -> List[Path]:
+        if not self.cfg.prompt_dir.exists():
+            raise SystemExit(f"Prompt dir does not exist: {self.cfg.prompt_dir}")
+        pats = [re.compile(x) for x in DEFAULT_PROMPT_GLOBS]
+        files = []
+        for p in self.cfg.prompt_dir.iterdir():
+            if p.is_file() and any(rx.match(p.name) for rx in pats):
+                files.append(p)
+        return sorted(files, key=lambda p: p.name)
+
+    def save_state(self, status: str, next_index: int, last_prompt: str = "", message: str = "", extra: Optional[Dict] = None) -> None:
+        data = self.cfg.to_state_base()
+        data.update({
+            "saved_at": now_iso(),
+            "status": status,
+            "next_index": next_index,
+            "last_prompt": last_prompt,
+            "message": message,
+            "prompt_count": len(self.prompts),
+        })
+        if extra:
+            data.update(extra)
+        self.cfg.state_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+        env_file = self.cfg.state_dir / "state.env"
+        env_file.write_text(
+            "\n".join([
+                f"PROVIDER={shlex.quote(self.cfg.provider)}",
+                f"PROMPT_DIR={shlex.quote(str(self.cfg.prompt_dir))}",
+                f"ROOT_DIR={shlex.quote(str(self.cfg.root_dir))}",
+                f"PROJECT_DIR={shlex.quote(str(self.cfg.project_dir))}",
+                f"PROJECT_NAME={shlex.quote(self.cfg.project_name)}",
+                f"STATE_DIR={shlex.quote(str(self.cfg.state_dir))}",
+                f"NEXT_INDEX={next_index}",
+                f"LAST_PROMPT={shlex.quote(last_prompt)}",
+                f"LAST_STATUS={shlex.quote(status)}",
+                f"LAST_MESSAGE={shlex.quote(message)}",
+                f"SAVED_AT={shlex.quote(data['saved_at'])}",
+                "",
+            ]),
+            encoding="utf-8",
+        )
+
+    def load_next_index(self) -> int:
+        if not self.cfg.state_file.exists():
+            raise SystemExit(f"No state file found for project '{self.cfg.project_name}': {self.cfg.state_file}")
+        data = json.loads(self.cfg.state_file.read_text(encoding="utf-8"))
+        # Carry forward paths from state when resuming.
+        return int(data.get("next_index", 0))
+
+    def start_index(self) -> int:
+        if self.cfg.resume:
+            return self.load_next_index()
+        if self.cfg.start_at:
+            for i, p in enumerate(self.prompts):
+                if p.name == self.cfg.start_at or str(p) == self.cfg.start_at:
+                    return i
+            raise SystemExit(f"start-at prompt not found: {self.cfg.start_at}")
+        return 0
+
+    def cwd_for_index(self, idx: int) -> Path:
+        if idx == 0 and not self.cfg.project_dir.exists():
+            return self.cfg.root_dir
+        self.cfg.project_dir.mkdir(parents=True, exist_ok=True)
+        return self.cfg.project_dir
+
+    def build_provider_command(self, prompt_file: Path, log_file: Path, prompt_text_file: Path) -> Tuple[List[str], Optional[str]]:
+        provider = PROVIDERS.get(self.cfg.provider)
+        if not provider:
+            raise SystemExit(f"Unknown provider: {self.cfg.provider}")
+
+        extra = self.cfg.extra_args or []
+        prompt_text = read_text_safe(prompt_file)
+
+        if provider.mode == "stdin":
+            cmd = list(provider.base_cmd)
+            if self.cfg.danger:
+                cmd.extend(provider.danger_args)
+            cmd.extend(extra)
+            if provider.stdin_marker:
+                cmd.append(provider.stdin_marker)
+            return cmd, prompt_text
+
+        if provider.mode == "arg":
+            cmd = list(provider.base_cmd)
+            if self.cfg.danger:
+                cmd.extend(provider.danger_args)
+            cmd.extend(extra)
+            cmd.append(prompt_text)
+            return cmd, None
+
+        if provider.mode == "ollama":
+            model = self.cfg.model or os.environ.get("CTRL_BOLT_OLLAMA_MODEL") or "qwen2.5-coder:7b"
+            cmd = list(provider.base_cmd) + [model]
+            cmd.extend(extra)
+            return cmd, prompt_text
+
+        if provider.mode == "custom":
+            if not self.cfg.provider_cmd:
+                raise SystemExit("--provider custom requires --provider-cmd")
+            fmt = {
+                "prompt_file": str(prompt_file),
+                "prompt_text_file": str(prompt_text_file),
+                "project_dir": str(self.cfg.project_dir),
+                "root_dir": str(self.cfg.root_dir),
+                "log_file": str(log_file),
+                "state_dir": str(self.cfg.state_dir),
+                "model": self.cfg.model or "",
+            }
+            rendered = self.cfg.provider_cmd.format(**fmt)
+            return ["bash", "-lc", rendered], None
+
+        raise SystemExit(f"Unsupported provider mode: {provider.mode}")
+
+    def run_provider(self, idx: int, prompt_file: Path, cwd: Path, log_file: Path) -> Tuple[int, str]:
+        prompt_text = read_text_safe(prompt_file)
+        prompt_text_file = self.cfg.state_dir / f"prompt_{idx:02d}_{prompt_file.stem}.txt"
+        prompt_text_file.write_text(prompt_text, encoding="utf-8")
+
+        cmd, stdin_text = self.build_provider_command(prompt_file, log_file, prompt_text_file)
+        cmd_display = shell_join(cmd[:-1] + ["<PROMPT_TEXT>"]) if self.cfg.provider in ("claude", "gemini", "aider") else shell_join(cmd)
+
+        print_c(f"provider: {self.cfg.provider}")
+        print_c(f"cwd: {cwd}")
+        print_c(f"prompt: {prompt_file.name}")
+        print_c(f"command: {cmd_display}")
+
+        if self.cfg.dry_run:
+            line = f"DRY RUN: would execute {cmd_display}\n"
+            log_file.write_text(line, encoding="utf-8")
+            return 0, line
+
+        with log_file.open("w", encoding="utf-8", errors="replace") as lf:
+            lf.write(f"# ctrlBolt log\n")
+            lf.write(f"started_at: {now_iso()}\n")
+            lf.write(f"provider: {self.cfg.provider}\n")
+            lf.write(f"cwd: {cwd}\n")
+            lf.write(f"prompt: {prompt_file}\n")
+            lf.write(f"prompt_sha256: {sha256_text(prompt_text)}\n")
+            lf.write(f"command: {cmd_display}\n")
+            lf.write("\n--- output ---\n")
+            lf.flush()
+
+            try:
+                self.current_process = subprocess.Popen(
+                    cmd,
+                    cwd=str(cwd),
+                    stdin=subprocess.PIPE if stdin_text is not None else None,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True,
+                )
+            except FileNotFoundError:
+                msg = f"command not found: {cmd[0]}\n"
+                lf.write(msg)
+                return 127, msg
+
+            output_chunks = []
+
+            if stdin_text is not None and self.current_process.stdin:
+                try:
+                    self.current_process.stdin.write(stdin_text)
+                    self.current_process.stdin.close()
+                except BrokenPipeError:
+                    pass
+
+            start = time.time()
+            timed_out = False
+
+            assert self.current_process.stdout is not None
+            while True:
+                line = self.current_process.stdout.readline()
+                if line:
+                    output_chunks.append(line)
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    lf.write(line)
+                    lf.flush()
+
+                ret = self.current_process.poll()
+                if ret is not None:
+                    # drain
+                    rest = self.current_process.stdout.read() or ""
+                    if rest:
+                        output_chunks.append(rest)
+                        sys.stdout.write(rest)
+                        sys.stdout.flush()
+                        lf.write(rest)
+                    break
+
+                if self.cfg.timeout and (time.time() - start) > self.cfg.timeout:
+                    timed_out = True
+                    self.current_process.terminate()
+                    time.sleep(2)
+                    if self.current_process.poll() is None:
+                        self.current_process.kill()
+                    break
+
+            code = self.current_process.poll()
+            if code is None:
+                code = 124 if timed_out else 1
+            if timed_out:
+                msg = f"\nctrlBolt timeout after {self.cfg.timeout}s\n"
+                output_chunks.append(msg)
+                lf.write(msg)
+
+            lf.write(f"\n--- end ---\nended_at: {now_iso()}\nexit_code: {code}\n")
+            self.current_process = None
+            return int(code), "".join(output_chunks)
+
+    def git_checkpoint(self, cwd: Path, prompt_name: str) -> None:
+        if not self.cfg.auto_commit:
+            return
+        if not (cwd / ".git").exists():
+            run_simple(["git", "init"], cwd)
+        code, _ = run_simple(["git", "rev-parse", "--is-inside-work-tree"], cwd)
+        if code != 0:
+            return
+        run_simple(["git", "add", "."], cwd)
+        code, _ = run_simple(["git", "diff", "--cached", "--quiet"], cwd)
+        if code != 0:
+            msg = f"ctrlBolt checkpoint: {prompt_name}"
+            run_simple(["git", "commit", "-m", msg], cwd)
+            print_c("git checkpoint saved")
+        else:
+            print_c("no git changes to checkpoint")
+
+    def run_tests_if_needed(self, cwd: Path) -> None:
+        if not self.cfg.run_tests:
+            return
+        if (cwd / "go.mod").exists():
+            print_c("running go test ./...")
+            code, out = run_simple(["go", "test", "./..."], cwd)
+            sys.stdout.write(out)
+            if code != 0:
+                warn("go test ./... failed")
+
+    def run(self) -> int:
+        self.setup()
+        start = self.start_index()
+        if start >= len(self.prompts):
+            print_c("nothing to do; state already complete")
+            return 0
+
+        print_c(f"ctrlBolt project: {self.cfg.project_name}")
+        print_c(f"provider: {self.cfg.provider}")
+        print_c(f"prompt dir: {self.cfg.prompt_dir}")
+        print_c(f"root dir: {self.cfg.root_dir}")
+        print_c(f"project dir: {self.cfg.project_dir}")
+        print_c(f"state dir: {self.cfg.state_dir}")
+        print_c(f"starting at: {start}/{len(self.prompts)}")
+
+        self.save_state("starting", start, "", "Starting ctrlBolt chain")
+
+        for idx in range(start, len(self.prompts)):
+            prompt = self.prompts[idx]
+            cwd = self.cwd_for_index(idx)
+            log_file = self.cfg.log_dir / f"{idx:02d}_{prompt.stem}_{self.cfg.provider}.log"
+
+            print_c("=" * 72)
+            print_c(f"running [{idx + 1}/{len(self.prompts)}]: {prompt.name}")
+
+            self.save_state("running", idx, prompt.name, "Running prompt")
+            code, output = self.run_provider(idx, prompt, cwd, log_file)
+
+            full_log_text = ""
+            try:
+                full_log_text = log_file.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                full_log_text = output
+
+            if detect_usage_limit(full_log_text):
+                warn("usage/rate/quota limit detected")
+                self.save_state(
+                    "usage_limit",
+                    idx,
+                    prompt.name,
+                    "Usage/rate/quota limit detected. Resume later with ctrlBolt --resume --project-dir <project_dir>.",
+                    {"log_file": str(log_file), "exit_code": code},
+                )
+                print()
+                print("Resume later with:")
+                print(f"  ctrlBolt --resume --project-dir {shlex.quote(str(self.cfg.project_dir))}")
+                return 75
+
+            if code != 0:
+                warn(f"provider exited non-zero: {code}")
+                self.save_state(
+                    "provider_error",
+                    idx,
+                    prompt.name,
+                    f"Provider exited with code {code}",
+                    {"log_file": str(log_file), "exit_code": code},
+                )
+                print(f"Log: {log_file}")
+                if self.cfg.fail_fast and not self.cfg.continue_on_error:
+                    print("Stopped. Resume after fixing with:")
+                    print(f"  ctrlBolt --resume --project-dir {shlex.quote(str(self.cfg.project_dir))}")
+                    return code if code else 1
+
+            if self.cfg.project_dir.exists():
+                self.run_tests_if_needed(self.cfg.project_dir)
+                self.git_checkpoint(self.cfg.project_dir, prompt.name)
+
+            self.save_state("completed", idx + 1, prompt.name, "Completed prompt", {"log_file": str(log_file)})
+
+        self.save_state("all_done", len(self.prompts), "", "All prompts completed")
+        print_c("all prompts completed")
+        print(f"State: {self.cfg.state_file}")
+        print(f"Logs:  {self.cfg.log_dir}")
+        return 0
+
+    def stop(self):
+        self.stop_requested = True
+        if self.current_process and self.current_process.poll() is None:
+            try:
+                self.current_process.terminate()
+            except Exception:
+                pass
+
+
+def print_providers() -> None:
+    print("ctrlBolt providers\n")
+    for name, spec in PROVIDERS.items():
+        print(f"{name}")
+        print(f"  {spec.description}")
+        print(f"  mode: {spec.mode}")
+        if spec.base_cmd:
+            print(f"  cmd:  {shell_join(spec.base_cmd)}")
+        if spec.danger_args:
+            print(f"  danger args: {shell_join(spec.danger_args)}")
+        if not spec.supports_edits:
+            print("  note: review/advisory provider by default; not a file-editing agent")
+        if spec.notes:
+            print(f"  notes: {spec.notes}")
+        print()
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="ctrlBolt",
+        description="Run numbered AI prompt chains with provider adapters, per-project state, resume, logs, and clean quota exits.",
+    )
+
+    p.add_argument("command", nargs="?", help="Optional command: providers")
+    p.add_argument("--provider", default="codex", choices=sorted(PROVIDERS.keys()), help="AI provider adapter")
+    p.add_argument("--prompt-dir", help="Directory containing numbered prompt files")
+    p.add_argument("--root-dir", default=os.getcwd(), help="Parent/root directory where prompt 00 can create the project")
+    p.add_argument("--project-dir", help="Project/repo directory")
+    p.add_argument("--project-name", help="State project name. Defaults to basename of project-dir")
+    p.add_argument("--state-root", help="Root for ctrlBolt state. Defaults to <root-dir>/.ctrlBolt/projects")
+    p.add_argument("--state-dir", help="Explicit state dir for this chain")
+    p.add_argument("--resume", action="store_true", help="Resume from saved state for project-dir/project-name")
+    p.add_argument("--start-at", help="Start at specific prompt filename")
+    p.add_argument("--danger", action="store_true", help="Pass provider-specific dangerous/bypass/auto-edit flags")
+    p.add_argument("--no-commit", action="store_true", help="Disable git checkpoints after each prompt")
+    p.add_argument("--run-tests", action="store_true", help="Run go test ./... after each prompt if go.mod exists")
+    p.add_argument("--continue-on-error", action="store_true", help="Continue after provider non-zero exit unless usage/quota detected")
+    p.add_argument("--timeout", type=int, help="Kill each provider prompt after N seconds")
+    p.add_argument("--model", help="Model name for providers that need one, especially ollama/custom")
+    p.add_argument("--provider-cmd", help="Custom provider command template. Requires --provider custom")
+    p.add_argument("--extra-arg", action="append", default=[], help="Extra argument passed to provider; can be repeated")
+    p.add_argument("--dry-run", action="store_true", help="Print what would run and save state/logs without invoking provider")
+    return p
+
+
+def load_resume_paths(args) -> argparse.Namespace:
+    # If project-dir is provided, derive state path. If not, try current tree common path.
+    if args.project_dir:
+        root_dir = expand_path(args.root_dir)
+        project_dir = expand_path(args.project_dir)
+        project_name = args.project_name or slugify(project_dir.name)
+        state_root = expand_path(args.state_root) if args.state_root else root_dir / ".ctrlBolt" / "projects"
+        state_dir = expand_path(args.state_dir) if args.state_dir else state_root / project_name
+        state_file = state_dir / "state.json"
+    else:
+        # Fallback: if cwd has .ctrlBolt/projects with a single state file, use it.
+        root_dir = expand_path(args.root_dir)
+        candidates = sorted((root_dir / ".ctrlBolt" / "projects").glob("*/state.json")) if (root_dir / ".ctrlBolt" / "projects").exists() else []
+        if len(candidates) == 1:
+            state_file = candidates[0]
+            state_dir = state_file.parent
+        else:
+            raise SystemExit("--resume needs --project-dir unless exactly one project state exists")
+
+    if not state_file.exists():
+        raise SystemExit(f"No state file found: {state_file}")
+
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    args.provider = state.get("provider", args.provider)
+    args.prompt_dir = state.get("prompt_dir", args.prompt_dir)
+    args.root_dir = state.get("root_dir", args.root_dir)
+    args.project_dir = state.get("project_dir", args.project_dir)
+    args.project_name = state.get("project_name", args.project_name)
+    args.state_root = state.get("state_root", args.state_root)
+    args.state_dir = state.get("state_dir", args.state_dir)
+    args.danger = bool(state.get("danger", args.danger))
+    args.no_commit = not bool(state.get("auto_commit", not args.no_commit))
+    args.run_tests = bool(state.get("run_tests", args.run_tests))
+    args.continue_on_error = bool(state.get("continue_on_error", args.continue_on_error))
+    args.timeout = state.get("timeout", args.timeout)
+    args.model = state.get("model", args.model)
+    args.provider_cmd = state.get("provider_cmd", args.provider_cmd)
+    args.extra_arg = state.get("extra_args", args.extra_arg)
+    return args
+
+
+def make_config(args) -> CtrlBoltConfig:
+    if args.resume:
+        args = load_resume_paths(args)
+
+    if not args.prompt_dir:
+        raise SystemExit("--prompt-dir is required unless --resume can load it")
+    if not args.project_dir:
+        raise SystemExit("--project-dir is required unless --resume can load it")
+
+    root_dir = expand_path(args.root_dir)
+    prompt_dir = expand_path(args.prompt_dir)
+    project_dir = expand_path(args.project_dir)
+    project_name = args.project_name or slugify(project_dir.name)
+    state_root = expand_path(args.state_root) if args.state_root else root_dir / ".ctrlBolt" / "projects"
+    state_dir = expand_path(args.state_dir) if args.state_dir else state_root / project_name
+    log_dir = state_dir / "logs"
+    state_file = state_dir / "state.json"
+
+    return CtrlBoltConfig(
+        provider=args.provider,
+        prompt_dir=prompt_dir,
+        root_dir=root_dir,
+        project_dir=project_dir,
+        project_name=project_name,
+        state_root=state_root,
+        state_dir=state_dir,
+        log_dir=log_dir,
+        state_file=state_file,
+        danger=args.danger,
+        resume=args.resume,
+        start_at=args.start_at,
+        auto_commit=not args.no_commit,
+        run_tests=args.run_tests,
+        continue_on_error=args.continue_on_error,
+        fail_fast=not args.continue_on_error,
+        timeout=args.timeout,
+        model=args.model,
+        provider_cmd=args.provider_cmd,
+        extra_args=args.extra_arg or [],
+        dry_run=args.dry_run,
+    )
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "providers":
+        print_providers()
+        return 0
+    if args.command and args.command != "run":
+        parser.error(f"unknown command: {args.command}")
+
+    cfg = make_config(args)
+    bolt = CtrlBolt(cfg)
+
+    def handle_signal(signum, frame):
+        warn(f"received signal {signum}; saving interrupted state")
+        bolt.stop()
+        try:
+            # Prompts not loaded yet? best effort.
+            bolt.save_state("interrupted", 0, "", f"Interrupted by signal {signum}")
+        except Exception:
+            pass
+        sys.exit(130)
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    return bolt.run()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

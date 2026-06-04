@@ -1,0 +1,47 @@
+<svg width="1200" height="360" viewBox="0 0 1200 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">ctrlBolt logo</title>
+  <desc id="desc">A terminal-inspired ctrlBolt logo with a lightning bolt and command prompt styling.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#101018"/>
+      <stop offset="55%" stop-color="#18142a"/>
+      <stop offset="100%" stop-color="#241a38"/>
+    </linearGradient>
+
+    <linearGradient id="bolt" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffe66d"/>
+      <stop offset="50%" stop-color="#ff9f1c"/>
+      <stop offset="100%" stop-color="#ff4d6d"/>
+    </linearGradient>
+
+    <filter id="softGlow">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="360" rx="42" fill="url(#bg)"/>
+
+  <rect x="52" y="52" width="1096" height="256" rx="26" fill="#0b0b12" stroke="#3d365d" stroke-width="3"/>
+  <circle cx="92" cy="88" r="10" fill="#ff5f56"/>
+  <circle cx="126" cy="88" r="10" fill="#ffbd2e"/>
+  <circle cx="160" cy="88" r="10" fill="#27c93f"/>
+
+  <path d="M260 65 L175 195 H250 L215 300 L345 145 H270 Z" fill="url(#bolt)" filter="url(#softGlow)"/>
+
+  <text x="392" y="165" font-family="JetBrains Mono, Fira Code, monospace" font-size="74" font-weight="800" fill="#f8f8ff">
+    ctrl<tspan fill="#ffbd2e">Bolt</tspan>
+  </text>
+
+  <text x="398" y="224" font-family="JetBrains Mono, Fira Code, monospace" font-size="28" fill="#a6adc8">
+    numbered prompt chains • provider adapters • resumable AI runs
+  </text>
+
+  <text x="398" y="274" font-family="JetBrains Mono, Fira Code, monospace" font-size="24" fill="#7dd3fc">
+    $ ctrlBolt --provider codex --prompt-dir ./kit --resume
+  </text>
+</svg>

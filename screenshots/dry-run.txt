@@ -1,0 +1,24 @@
+[1;36m[02:05:44][0m ctrlBolt project: ctrlbolt-demo
+[1;36m[02:05:44][0m provider: codex
+[1;36m[02:05:44][0m prompt dir: /home/dopamine/bb/projects/ctrlBolt/examples/demo_prompt_kit
+[1;36m[02:05:44][0m root dir: /tmp
+[1;36m[02:05:44][0m project dir: /tmp/ctrlbolt-demo
+[1;36m[02:05:44][0m state dir: /tmp/.ctrlBolt/projects/ctrlbolt-demo
+[1;36m[02:05:44][0m starting at: 0/2
+[1;36m[02:05:44][0m ========================================================================
+[1;36m[02:05:44][0m running [1/2]: 00_MASTER.md
+[1;36m[02:05:44][0m provider: codex
+[1;36m[02:05:44][0m cwd: /tmp/ctrlbolt-demo
+[1;36m[02:05:44][0m prompt: 00_MASTER.md
+[1;36m[02:05:44][0m command: codex exec -
+[1;36m[02:05:44][0m no git changes to checkpoint
+[1;36m[02:05:44][0m ========================================================================
+[1;36m[02:05:44][0m running [2/2]: 01_REFINER.md
+[1;36m[02:05:44][0m provider: codex
+[1;36m[02:05:44][0m cwd: /tmp/ctrlbolt-demo
+[1;36m[02:05:44][0m prompt: 01_REFINER.md
+[1;36m[02:05:44][0m command: codex exec -
+[1;36m[02:05:44][0m no git changes to checkpoint
+[1;36m[02:05:44][0m all prompts completed
+State: /tmp/.ctrlBolt/projects/ctrlbolt-demo/state.json
+Logs:  /tmp/.ctrlBolt/projects/ctrlbolt-demo/logs
